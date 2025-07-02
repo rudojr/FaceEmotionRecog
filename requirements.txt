@@ -3,3 +3,4 @@ tensorflow~=2.16.2
 streamlit
 pillow
 tensorflow
+opencv-python
