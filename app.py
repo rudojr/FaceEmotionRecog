@@ -45,7 +45,7 @@ def preprocess_image(image):
         image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
     # Resize về kích thước model expect (thường là 48x48 cho emotion recognition)
-    image = cv2.resize(image, (48, 48))
+    image = cv2.resize(image, (48, 38))
 
     # Normalize pixel values
     image = image.astype('float32') / 255.0
@@ -65,13 +65,20 @@ def detect_faces(image):
     return faces
 
 
-def predict_emotion(model, face_image):
-    """Dự đoán cảm xúc từ ảnh khuôn mặt"""
+# def predict_emotion(model, face_image):
+#     """Dự đoán cảm xúc từ ảnh khuôn mặt"""
+#     processed_image = preprocess_image(face_image)
+#     prediction = model.predict(processed_image, verbose=0)[0]
+#     emotion_index = np.argmax(prediction)
+#     confidence = np.max(prediction) * 100
+#     return EMOTION_CLASSES[emotion_index], confidence
+
+def predict_top_emotions(model, face_image, top_k=3):
     processed_image = preprocess_image(face_image)
-    prediction = model.predict(processed_image, verbose=0)
-    emotion_index = np.argmax(prediction)
-    confidence = np.max(prediction) * 100
-    return EMOTION_CLASSES[emotion_index], confidence
+    prediction = model.predict(processed_image, verbose=0)[0]
+    top_indices = prediction.argsort()[-top_k:][::-1]
+    top_emotions = [(EMOTION_CLASSES[i], float(prediction[i]) * 100) for i in top_indices]
+    return top_emotions
 
 
 class VideoTransformer(VideoTransformerBase):
@@ -96,13 +103,14 @@ class VideoTransformer(VideoTransformerBase):
 
                 if face.size > 0:
                     try:
-                        # Dự đoán cảm xúc
-                        emotion, confidence = predict_emotion(self.model, face)
+                        top_emotions = predict_top_emotions(self.model, face, top_k=3)
 
-                        # Hiển thị kết quả
-                        text = f"{emotion}: {confidence:.1f}%"
-                        cv2.putText(img, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.6, (0, 255, 0), 2)
+                        for i, (emo, conf) in enumerate(top_emotions):
+                            cv2.putText(img, f"{emo}: {conf:.1f}%",
+                                        (x, y - 10 - i * 20),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.5, (0, 255, 0), 1)
+
                     except Exception as e:
                         cv2.putText(img, "Error", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX,
                                     0.6, (0, 0, 255), 2)
@@ -145,46 +153,41 @@ def main():
 
             with col1:
                 st.subheader("Ảnh gốc")
-                st.image(image, use_column_width=True)
+                st.image(image, use_container_width=True)
 
             with col2:
                 st.subheader("Kết quả nhận dạng")
 
-                # Phát hiện khuôn mặt
                 faces = detect_faces(image_array)
 
                 if len(faces) > 0:
-                    # Tạo ảnh kết quả
                     result_image = image_array.copy()
                     emotions_detected = []
 
                     for i, (x, y, w, h) in enumerate(faces):
-                        # Vẽ khung quanh khuôn mặt
                         cv2.rectangle(result_image, (x, y), (x + w, y + h), (255, 0, 0), 2)
 
-                        # Cắt vùng khuôn mặt
                         face = image_array[y:y + h, x:x + w]
 
-                        # Dự đoán cảm xúc
-                        emotion, confidence = predict_emotion(model, face)
-                        emotions_detected.append((emotion, confidence))
+                        top_emotions = predict_top_emotions(model, face, top_k=3)
+                        emotions_detected.append(top_emotions)  # lưu cả top 3
 
-                        # Thêm text lên ảnh
-                        cv2.putText(result_image, f"{emotion}: {confidence:.1f}%",
-                                    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                        best_emotion, best_conf = top_emotions[0]
+                        cv2.putText(result_image, f"{best_emotion}: {best_conf:.1f}%",
+                                    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 0, 0), 5)
 
-                    # Hiển thị ảnh kết quả
-                    st.image(result_image, use_column_width=True)
+                    st.image(result_image, use_container_width=True)
 
-                    # Hiển thị chi tiết kết quả
                     st.subheader("Chi tiết kết quả:")
-                    for i, (emotion, confidence) in enumerate(emotions_detected):
-                        color = EMOTION_COLORS.get(emotion, '#000000')
-                        st.markdown(f"""
-                        <div style='padding: 10px; border-left: 4px solid {color}; margin: 5px 0;'>
-                            <strong>Khuôn mặt {i + 1}:</strong> {emotion} ({confidence:.1f}% tin cậy)
-                        </div>
-                        """, unsafe_allow_html=True)
+                    for i, top_emotions in enumerate(emotions_detected):
+                        st.markdown(f"<strong>Khuôn mặt {i + 1}:</strong>", unsafe_allow_html=True)
+                        for emo, conf in top_emotions:
+                            color = EMOTION_COLORS.get(emo, '#000000')
+                            st.markdown(f"""
+                            <div style='padding: 5px; border-left: 4px solid {color}; margin: 3px 0;'>
+                                {emo}: {conf:.1f}%
+                            </div>
+                            """, unsafe_allow_html=True)
                 else:
                     st.warning("Không phát hiện được khuôn mặt trong ảnh!")
                     st.info("💡 Mẹo: Hãy thử với ảnh có khuôn mặt rõ ràng và không bị che khuất")
@@ -213,7 +216,6 @@ def main():
         else:
             st.warning("Camera chưa được kích hoạt")
 
-    # Thông tin về các loại cảm xúc
     with st.expander("ℹ️ Thông tin về các loại cảm xúc"):
         cols = st.columns(len(EMOTION_CLASSES))
         for i, emotion in enumerate(EMOTION_CLASSES):
@@ -225,15 +227,7 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
-    # Footer
     st.markdown("---")
-    st.markdown(
-        "<div style='text-align: center; color: gray;'>"
-        "🤖 Được phát triển bằng Streamlit và TensorFlow"
-        "</div>",
-        unsafe_allow_html=True
-    )
-
 
 if __name__ == "__main__":
     main()
