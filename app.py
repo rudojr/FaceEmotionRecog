@@ -1,8 +1,14 @@
+import statistics
+import av
+import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import cv2
 import numpy as np
 import tensorflow as tf
 from PIL import Image
+import time
+from collections import deque
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 
 # Cấu hình trang
@@ -11,6 +17,8 @@ st.set_page_config(
     page_icon="😊",
     layout="wide"
 )
+
+st_autorefresh(interval=2000, key="emotion_refresh")
 
 # Các lớp cảm xúc
 EMOTION_CLASSES = ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
@@ -28,7 +36,6 @@ EMOTION_COLORS = {
 # Cache model để tránh load lại nhiều lần
 @st.cache_resource
 def load_model():
-    """Load model đã train sẵn"""
     try:
         model = tf.keras.models.load_model('fer_cnn.h5')
         return model
@@ -39,18 +46,14 @@ def load_model():
 
 
 def preprocess_image(image):
-    """Tiền xử lý ảnh cho model"""
-    # Chuyển sang grayscale nếu cần
+
     if len(image.shape) == 3:
         image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    # Resize về kích thước model expect (thường là 48x48 cho emotion recognition)
     image = cv2.resize(image, (48, 38))
 
-    # Normalize pixel values
     image = image.astype('float32') / 255.0
 
-    # Expand dimensions để phù hợp với input model
     image = np.expand_dims(image, axis=0)
     image = np.expand_dims(image, axis=-1)
 
@@ -58,7 +61,6 @@ def preprocess_image(image):
 
 
 def detect_faces(image):
-    """Phát hiện khuôn mặt trong ảnh"""
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if len(image.shape) == 3 else image
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
@@ -82,28 +84,36 @@ def predict_top_emotions(model, face_image, top_k=3):
 
 
 class VideoTransformer(VideoTransformerBase):
-    """Class xử lý video stream từ camera"""
-
     def __init__(self):
         self.model = load_model()
+        self.latencies = deque(maxlen=200)
+        self.fps_values = deque(maxlen=200)
+        self.emotions_log = []
+        self.last_log_time = time.time()
+        self.history = []
+        self.device = "cpu"
 
-    def transform(self, frame):
+
+    def recv(self, frame):
+        start_time = time.time()
+
         img = frame.to_ndarray(format="bgr24")
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        frame_emotions = []
 
         if self.model is not None:
             faces = detect_faces(img_rgb)
 
             for (x, y, w, h) in faces:
-                # Vẽ khung quanh khuôn mặt
                 cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
 
-                # Cắt vùng khuôn mặt
                 face = img_rgb[y:y + h, x:x + w]
 
                 if face.size > 0:
                     try:
                         top_emotions = predict_top_emotions(self.model, face, top_k=3)
+                        frame_emotions.extend([emo for emo, _ in top_emotions])
 
                         for i, (emo, conf) in enumerate(top_emotions):
                             cv2.putText(img, f"{emo}: {conf:.1f}%",
@@ -115,7 +125,65 @@ class VideoTransformer(VideoTransformerBase):
                         cv2.putText(img, "Error", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX,
                                     0.6, (0, 0, 255), 2)
 
-        return img
+        end_time = time.time()
+        latency = end_time - start_time
+        fps = 1.0 / latency if latency > 0 else 0
+
+        self.latencies.append(latency)
+        self.fps_values.append(fps)
+        self.emotions_log.extend(frame_emotions)
+
+        bench_text = f"Latency: {latency * 1000:.1f} ms | FPS: {fps:.1f}"
+        cv2.putText(img, bench_text, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        now = time.time()
+        if now - self.last_log_time >= 10.0:
+            if self.latencies and self.fps_values:
+                stats = {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "latency_mean": statistics.mean(self.latencies),
+                    "latency_median": statistics.median(self.latencies),
+                    "latency_std": statistics.pstdev(self.latencies),
+                    "fps_mean": statistics.mean(self.fps_values),
+                    "fps_median": statistics.median(self.fps_values),
+                    "fps_std": statistics.pstdev(self.fps_values),
+                    "top_emotions": pd.Series(self.emotions_log).value_counts().head(3).to_dict()
+                }
+
+                self.history.append(stats)
+
+                self.latencies.clear()
+                self.fps_values.clear()
+                self.emotions_log.clear()
+                self.last_log_time = now
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    def get_benchmark(self):
+        if len(self.latencies) == 0:
+            return None
+        arr = np.array(self.latencies)
+        fps_arr = np.array(self.fps_values)
+        return {
+            "Device": self.device.upper(),
+            "Latency (ms)": {
+                "mean": arr.mean() * 1000,
+                "median": np.median(arr) * 1000,
+                "std": arr.std() * 1000
+            },
+            "FPS": {
+                "mean": fps_arr.mean(),
+                "median": np.median(fps_arr),
+                "std": fps_arr.std()
+            }
+        }
+
+    def get_history_df(self):
+        if self.history:
+            return pd.DataFrame(self.history)
+        else:
+            return pd.DataFrame()
 
 
 def main():
@@ -145,7 +213,6 @@ def main():
         )
 
         if uploaded_file is not None:
-            # Hiển thị ảnh đã upload
             image = Image.open(uploaded_file)
             image_array = np.array(image)
 
@@ -157,9 +224,7 @@ def main():
 
             with col2:
                 st.subheader("Kết quả nhận dạng")
-
                 faces = detect_faces(image_array)
-
                 if len(faces) > 0:
                     result_image = image_array.copy()
                     emotions_detected = []
@@ -196,25 +261,38 @@ def main():
         st.header("Sử dụng Camera để nhận dạng cảm xúc real-time")
 
         st.info("📌 Cho phép truy cập camera khi được yêu cầu")
-
-        # Cấu hình WebRTC
         rtc_configuration = RTCConfiguration({
             "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
         })
 
         webrtc_ctx = webrtc_streamer(
             key="emotion-detection",
-            video_transformer_factory=VideoTransformer,
+            video_processor_factory=VideoTransformer,
             rtc_configuration=rtc_configuration,
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True,
         )
 
-        st.markdown("### 📊 Thống kê cảm xúc")
-        if webrtc_ctx.video_transformer:
-            st.info("Camera đang hoạt động. Hướng khuôn mặt vào camera để nhận dạng cảm xúc!")
-        else:
-            st.warning("Camera chưa được kích hoạt")
+        stats_placeholder = st.empty()
+        table_placeholder = st.empty()
+
+        if webrtc_ctx.video_processor:
+            df = webrtc_ctx.video_processor.get_history_df()
+            bench = webrtc_ctx.video_processor.get_benchmark()
+
+            if not df.empty:
+                st.subheader("📊 Thống kê Benchmark & Cảm xúc")
+                st.dataframe(df)
+
+            if bench:
+                st.markdown("### ⚡ Benchmark (Realtime)")
+                st.write(f"**Device**: {bench['Device']}")
+                st.write(f"**Latency (ms)** → Mean: {bench['Latency (ms)']['mean']:.1f}, "
+                         f"Median: {bench['Latency (ms)']['median']:.1f}, "
+                         f"Std: {bench['Latency (ms)']['std']:.1f}")
+                st.write(f"**FPS** → Mean: {bench['FPS']['mean']:.1f}, "
+                         f"Median: {bench['FPS']['median']:.1f}, "
+                         f"Std: {bench['FPS']['std']:.1f}")
 
     with st.expander("ℹ️ Thông tin về các loại cảm xúc"):
         cols = st.columns(len(EMOTION_CLASSES))
