@@ -33,31 +33,52 @@ EMOTION_COLORS = {
 }
 
 
-# Cache model để tránh load lại nhiều lần
+MODEL_CONFIG = {
+    "CNN": {"input_size": (48,38), "to_rgb": False, "normalize": True},
+    "VGG19": {"input_size": (48,48), "to_rgb": True, "normalize": True}
+}
+
 @st.cache_resource
-def load_model():
+def load_model_by_name(model_name):
+    model_files = {
+        "CNN": "fer_cnn.h5",
+        "VGG19": "fer_vgg19.h5"
+    }
+    file_path = model_files.get(model_name)
+    if not file_path:
+        st.error(f"Model '{model_name}' không tồn tại trong danh sách.")
+        return None
     try:
-        model = tf.keras.models.load_model('fer_cnn.h5')
+        model = tf.keras.models.load_model(file_path)
+        st.success(f"Model '{model_name}' đã load thành công.")
         return model
     except Exception as e:
-        st.error(f"Không thể load model: {e}")
+        st.error(f"Không thể load model '{model_name}': {e}")
         st.info("Vui lòng đảm bảo file model tồn tại và đường dẫn chính xác")
         return None
 
 
-def preprocess_image(image):
+def preprocess_image(img, model_name):
+    config = MODEL_CONFIG[model_name]
 
-    if len(image.shape) == 3:
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    if len(img.shape) == 2 or (len(img.shape) == 3 and img.shape[2] == 1):
+        if config["to_rgb"]:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    elif len(img.shape) == 3 and img.shape[2] == 3 and not config["to_rgb"]:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    image = cv2.resize(image, (48, 38))
+    img = cv2.resize(img, config["input_size"])
 
-    image = image.astype('float32') / 255.0
+    if config["normalize"]:
+        img = img.astype('float32') / 255.0
 
-    image = np.expand_dims(image, axis=0)
-    image = np.expand_dims(image, axis=-1)
+    if model_name == "CNN":
+        img = np.expand_dims(img, axis=0)
+        img = np.expand_dims(img, axis=-1)
+    else:
+        img = np.expand_dims(img, axis=0)
 
-    return image
+    return img
 
 
 def detect_faces(image):
@@ -75,8 +96,8 @@ def detect_faces(image):
 #     confidence = np.max(prediction) * 100
 #     return EMOTION_CLASSES[emotion_index], confidence
 
-def predict_top_emotions(model, face_image, top_k=3):
-    processed_image = preprocess_image(face_image)
+def predict_top_emotions(model, model_name,face_image, top_k=3):
+    processed_image = preprocess_image(face_image, model_name)
     prediction = model.predict(processed_image, verbose=0)[0]
     top_indices = prediction.argsort()[-top_k:][::-1]
     top_emotions = [(EMOTION_CLASSES[i], float(prediction[i]) * 100) for i in top_indices]
@@ -85,7 +106,7 @@ def predict_top_emotions(model, face_image, top_k=3):
 
 class VideoTransformer(VideoTransformerBase):
     def __init__(self):
-        self.model = load_model()
+        self.model = load_model_by_name()
         self.latencies = deque(maxlen=200)
         self.fps_values = deque(maxlen=200)
         self.emotions_log = []
@@ -190,11 +211,6 @@ def main():
     st.title("🎭 Ứng dụng nhận dạng cảm xúc khuôn mặt")
     st.markdown("---")
 
-    # Load model
-    model = load_model()
-
-    if model is None:
-        st.stop()
 
     # Sidebar cho các tùy chọn
     st.sidebar.title("Tùy chọn")
@@ -205,6 +221,13 @@ def main():
 
     if option == "📤 Upload ảnh":
         st.header("Upload ảnh để nhận dạng cảm xúc")
+
+        model_option = st.selectbox(
+            "Chọn mô hình để nhận dạng:",
+            ["CNN", "VGG19"]
+        )
+
+        model = load_model_by_name(model_option)
 
         uploaded_file = st.file_uploader(
             "Chọn ảnh...",
@@ -228,13 +251,10 @@ def main():
                 if len(faces) > 0:
                     result_image = image_array.copy()
                     emotions_detected = []
-
                     for i, (x, y, w, h) in enumerate(faces):
                         cv2.rectangle(result_image, (x, y), (x + w, y + h), (255, 0, 0), 2)
-
                         face = image_array[y:y + h, x:x + w]
-
-                        top_emotions = predict_top_emotions(model, face, top_k=3)
+                        top_emotions = predict_top_emotions(model, model_option,face, top_k=3)
                         emotions_detected.append(top_emotions)  # lưu cả top 3
 
                         best_emotion, best_conf = top_emotions[0]

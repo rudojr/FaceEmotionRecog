@@ -4,3 +4,5 @@ streamlit
 pillow
 tensorflow
 opencv-python
+streamlit-webrtc
+streamlit_autorefresh
