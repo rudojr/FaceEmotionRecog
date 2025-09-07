@@ -106,7 +106,7 @@ def predict_top_emotions(model, model_name,face_image, top_k=3):
 
 class VideoTransformer(VideoTransformerBase):
     def __init__(self):
-        self.model = load_model_by_name()
+        self.model = load_model_by_name("CNN")
         self.latencies = deque(maxlen=200)
         self.fps_values = deque(maxlen=200)
         self.emotions_log = []
